@@ -1,0 +1,95 @@
+import pandas
+import numpy as np
+import tensorflow as tf
+
+# download data
+dataframe = pandas.read_csv('https://raw.githubusercontent.com/bryankolaczkowski/ALS3200C/main/mbiome.data.csv')
+
+# create train-validate split
+train_dataframe = dataframe.sample(frac=0.8, random_state=827847)
+valid_dataframe = dataframe.drop(train_dataframe.index)
+
+# extract explanatory variables
+dta_ids = [ x for x in dataframe.columns if x.find('DTA') == 0 ]
+train_x = train_dataframe[dta_ids].to_numpy()
+valid_x = valid_dataframe[dta_ids].to_numpy()
+
+# add 'location' to sequence data
+loc = np.linspace(start=-2.5, stop=+2.5, num=train_x.shape[1])
+train_x = np.stack([ train_x, np.array([loc]*train_x.shape[0]) ], axis=-1)
+valid_x = np.stack([ valid_x, np.array([loc]*valid_x.shape[0]) ], axis=-1)
+
+# extract labels
+train_y = train_dataframe['LBL0'].to_numpy()
+valid_y = valid_dataframe['LBL0'].to_numpy()
+
+# package data into tensorflow dataset
+train_data = tf.data.Dataset.from_tensor_slices((train_x, train_y)).batch(32)
+valid_data = tf.data.Dataset.from_tensor_slices((valid_x, valid_y)).batch(32)
+
+#######################
+##### BUILD MODEL #####
+#######################
+
+## create functional API in order to create splits & residuals for MHA
+dim=8 # using data representation dimensionality of 2 to start
+
+#define input shape & linear data projection
+layin = tf.keras.Input(shape=(256,2)) #we know this from module 12
+linear = tf.keras.layers.Dense(units=dim)(layin)
+
+# MHA BLOCK #
+mHA1 = tf.keras.layers.MultiHeadAttention(num_heads=4, key_dim=dim)(linear,linear,linear) # define MHA layer
+resid1 = tf.keras.layers.Add()([linear,mHA1]) # define residual connection to bypass MHA
+norma = tf.keras.layers.LayerNormalization()(resid1) # layer normalization using output data from MHA
+
+# FEED FORWARD BLOCK # 
+# create a layer with 2 dense layers separated by non-linear ReLU activation function
+feefo1 = tf.keras.layers.Dense(units=dim, activation=tf.keras.activations.relu)(norma)
+feefo2 = tf.keras.layers.Dense(units=dim)(feefo1)
+resid2 = tf.keras.layers.Add()([norma,feefo1])
+norma2 = tf.keras.layers.LayerNormalization()(resid2) # output of last FF block is in norma2, the superior norma
+
+# MHA BLOCK 2 #
+mHA2 = tf.keras.layers.MultiHeadAttention(num_heads=2, key_dim=dim)(linear,linear,linear) # define MHA layer
+resid3 = tf.keras.layers.Add()([linear,mHA2]) # define residual connection to bypass MHA
+norma3 = tf.keras.layers.LayerNormalization()(resid3) # layer normalization using output data from MHA
+
+# FEED FORWARD BLOCK 2 # 
+# create a layer with 2 dense layers separated by non-linear ReLU activation function
+feefo3 = tf.keras.layers.Dense(units=dim, activation=tf.keras.activations.relu)(norma3)
+feefo4 = tf.keras.layers.Dense(units=dim)(feefo3)
+resid4 = tf.keras.layers.Add()([norma3,feefo3])
+norma4 = tf.keras.layers.LayerNormalization()(resid4) # output of last FF block is in norma2, the superior norma
+
+# MHA BLOCK 3 #
+mHA3 = tf.keras.layers.MultiHeadAttention(num_heads=2, key_dim=dim)(linear,linear,linear) # define MHA layer
+resid5 = tf.keras.layers.Add()([linear,mHA3]) # define residual connection to bypass MHA
+norma5 = tf.keras.layers.LayerNormalization()(resid5) # layer normalization using output data from MHA
+
+# FEED FORWARD BLOCK 3 # 
+# create a layer with 2 dense layers separated by non-linear ReLU activation function
+feefo5 = tf.keras.layers.Dense(units=dim, activation=tf.keras.activations.relu)(norma5)
+feefo6 = tf.keras.layers.Dense(units=dim)(feefo5)
+resid6 = tf.keras.layers.Add()([norma5,feefo5])
+norma6 = tf.keras.layers.LayerNormalization()(resid6) # output of last FF block is in norma2, the superior norma
+
+# CLASSIFICATION BLOCK 1 # 
+#flatten the layers with data input from norma2
+flat = tf.keras.layers.Flatten()(norma6)
+layout = tf.keras.layers.Dense(units=1, activation=tf.keras.activations.sigmoid)(flat)
+
+### MODEL SUMMARY ###
+model = tf.keras.Model(inputs=layin, outputs=layout)
+model.summary()
+
+### COMPILE MODEL ###
+model.compile(optimizer=tf.keras.optimizers.Adam(),
+              loss=tf.keras.losses.BinaryCrossentropy(),
+              metrics=['accuracy'])
+
+### FIT MODEL ###
+model.fit(train_data, epochs=40, validation_data=valid_data)
+
+
+
